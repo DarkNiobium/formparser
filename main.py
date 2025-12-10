@@ -1,6 +1,12 @@
 import customtkinter as ctk
-import asyncio
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 import time
 import os
 import json
@@ -26,193 +32,120 @@ CITIES = [
     "Navoiy", "Qoraqalpog'iston Respublikasi"
 ]
 
-# ================== PLAYWRIGHT HELPERS (ASYNC, HEAD-FULL) ==================
+# ================== SELENIUM YORDAMCHI FUNKSIYALAR ==================
 
-async def _ensure_profile_dir():
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-
-async def open_persistent_context(initial_url=None, headless=False, log_callback=lambda m: None):
-    """
-    Opens Playwright persistent context using PROFILE_DIR so Chrome/Chromium profile is reused.
-    Returns (playwright, context, page) or (None, None, None) on failure.
-    """
-    await _ensure_profile_dir()
+def scroll_to(driver, element):
     try:
-        pw = await async_playwright().start()
-        context = await pw.chromium.launch_persistent_context(
-            user_data_dir=PROFILE_DIR,
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-default-browser-check",
-                "--disable-extensions",
-                "--start-fullscreen"
-            ],
-            accept_downloads=True
+        driver.execute_script(
+            "arguments[0].scrollIntoView({behavior: 'instant', block: 'center'});",
+            element
         )
-        # Get a page (existing or new)
-        if context.pages:
-            page = context.pages[0]
-        else:
-            page = await context.new_page()
-        if initial_url:
-            try:
-                await page.goto(initial_url, timeout=30000)
-            except Exception:
-                pass
-        #await page.set_viewport_size({"width": 1920, "height": 1080})
-        return pw, context, page
-    except Exception as e:
-        log_callback(f"Brauzerni ishga tushirishda xato: {e}")
-        try:
-            await pw.stop()
-        except:
-            pass
-        return None, None, None
-
-async def close_context(pw, context):
-    try:
-        if context:
-            await context.close()
-    except:
-        pass
-    try:
-        if pw:
-            await pw.stop()
+        time.sleep(0.15)
     except:
         pass
 
-async def scroll_to_element(page, handle):
-    try:
-        await page.evaluate("el => el.scrollIntoView({behavior: 'instant', block: 'center'})", handle)
-        #await asyncio.sleep(0.06)
-    except:
-        pass
 
-async def safe_click_handle(handle):
+def safe_click(driver, element):
     try:
-        await handle.click()
-        return True
+        element.click()
     except:
         try:
-            await handle.evaluate("el => el.click()")
-            return True
+            driver.execute_script("arguments[0].click();", element)
         except:
             return False
+    return True
 
-# ================== FORM FILL HELPERS ==================
 
-async def find_blocks(page):
-    return await page.query_selector_all(".Qr7Oae")
+def find_blocks(driver):
+    return driver.find_elements(By.CLASS_NAME, "Qr7Oae")
 
-async def fill_text_or_date_handle(page, block, value):
+
+def fill_text_or_date(driver, block, value):
     try:
-        # Прокрутка
-        await page.evaluate("(el) => el.scrollIntoView({behavior: 'instant', block: 'center'})", block)
+        scroll_to(driver, block)
+        input_field = block.find_element(By.CSS_SELECTOR,
+                                            'input[type="text"], input[type="date"], input[type="tel"]')
+        input_field.clear()
 
-        input_field = await block.query_selector('input[type="text"], input[type="date"], input[type="tel"]')
-        if not input_field:
-            return False
+        if "." in value and value.replace(".", "").isdigit():
+            value = value.replace(".", "")
 
-        # Очистка
-        try:
-            await input_field.fill("")  # быстрый вариант
-        except:
-            await input_field.evaluate("el => el.value = ''")
-
-        # Если поле дата, конвертируем DD.MM.YYYY → YYYY-MM-DD
-        input_type = await input_field.get_attribute("type")
-        if input_type == "date" and "." in value:
-            parts = value.split(".")
-            if len(parts) == 3:
-                value = f"{parts[2]}-{parts[1]}-{parts[0]}"
-
-        # Отправка символов (как send_keys)
-        await input_field.type(value, delay=10)  # delay=10ms между символами
+        input_field.send_keys(value)
         return True
-    except Exception as e:
-        print(f"fill_text_or_date_handle error: {e}")
+    except:
         return False
 
 
-async def click_by_text_handle(page, block, keyword):
+def click_by_text(driver, block, keyword):
     try:
-        await scroll_to_element(page, block)
-        options = await block.query_selector_all("div[role='radio'], div[role='checkbox']")
+        scroll_to(driver, block)
+        options = block.find_elements(By.CSS_SELECTOR,
+                                    "div[role='radio'], div[role='checkbox']")
+
         for o in options:
-            label = (await o.get_attribute("aria-label") or await o.inner_text() or "").strip()
+            label = (o.get_attribute("aria-label") or o.text or "").strip()
             if keyword.lower() in label.lower():
-                return await safe_click_handle(o)
+                return safe_click(driver, o)
+
         return False
     except:
         return False
 
-async def fill_dropdown_handle(page, block, value):
+
+def fill_dropdown(driver, block, value, wait: WebDriverWait):
     try:
-        await scroll_to_element(page, block)
-        dropdown_trigger = await block.query_selector('div[role="listbox"]')
-        if dropdown_trigger:
-            await dropdown_trigger.click()
-            try:
-                opt = page.locator(f"//div[@role='option']//span[text()=\"{value}\"]")
-                await opt.first.click(timeout=200)
-                return True
-            except:
-                try:
-                    opt2 = page.locator(f"//div[@role='option']//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), \"{value.lower()}\")]")
-                    await opt2.first.click(timeout=200)
-                    return True
-                except:
-                    try:
-                        await page.keyboard.press('Escape')
-                    except:
-                        pass
-                    return False
-        else:
-            return False
+        scroll_to(driver, block)
+        dropdown_trigger = block.find_element(By.CSS_SELECTOR, 'div[role="listbox"]')
+        wait.until(EC.element_to_be_clickable(dropdown_trigger)).click()
+
+        options_container = wait.until(
+            EC.presence_of_element_located((By.XPATH, "//div[@role='listbox']"))
+        )
+
+        xpath_option = f'.//div[@role="option"]//span[text()="{value}"]'
+        option_element = wait.until(
+            EC.element_to_be_clickable((By.XPATH, xpath_option))
+        )
+
+        safe_click(driver, option_element)
+        return True
+
     except:
         try:
-            await page.keyboard.press('Escape')
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
         except:
             pass
         return False
 
-async def upload_file_handle(page, block, file_path, timeout_ms=10000):
+
+def upload_file(driver, block, file_path, wait):
     if not os.path.exists(file_path):
         return False
+
     try:
-        await scroll_to_element(page, block)
-        file_input = await block.query_selector('input[type="file"]')
-        if file_input:
-            await file_input.set_input_files(file_path)
-            return True
-        add_btn = await block.query_selector(".appsMaterialWizButtonPaperbuttonContent, button, span:has-text('Добавить'), span:has-text('Add'), span:has-text('Fayl')")
-        if add_btn:
-            try:
-                await add_btn.click()
-            except:
-                try:
-                    await add_btn.evaluate('el=>el.click()')
-                except:
-                    pass
-        start = time.time()
-        while time.time() - start < (timeout_ms / 1000.0):
-            frames = page.frames
-            found = False
-            for f in frames:
-                try:
-                    input_f = await f.query_selector('input[type="file"]')
-                    if input_f:
-                        await input_f.set_input_files(file_path)
-                        found = True
-                        break
-                except:
-                    continue
-            if found:
-                return True
-            await asyncio.sleep(0.2)
-        return False
+        scroll_to(driver, block)
+
+        add_btn = block.find_element(
+            By.XPATH,
+            ".//*[contains(text(),'Добавить') or contains(text(),'Add') or contains(text(),'Fayl')]"
+        )
+
+        safe_click(driver, add_btn)
+
+        iframe = wait.until(EC.presence_of_element_located((
+            By.CSS_SELECTOR, "iframe[src*='picker'], iframe.picker-frame"
+        )))
+
+        driver.switch_to.frame(iframe)
+        file_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']")))
+        file_input.send_keys(file_path)
+        driver.switch_to.default_content()
+
+        time.sleep(1)
+        return True
+
     except:
+        driver.switch_to.default_content()
         return False
 
 # ================== SETTINGS ==================
@@ -233,119 +166,161 @@ def save_settings(data):
     except:
         pass
 
+# ================== BRAUZERNI OCHISH UCHUN ASOSIY FUNKSIYA ==================
+
+def open_browser_with_profile(log_callback, initial_url=None):
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+
+    options = Options()
+    options.add_argument(f"--user-data-dir={PROFILE_DIR}")
+    options.add_argument("--profile-directory=Default")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    
+    try:
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=options
+        )
+        driver.maximize_window()
+        driver.get(initial_url or "https://google.com")
+        return driver
+    except Exception as e:
+        log_callback(f"Brauzerni ishga tushirishda xato: {e}")
+        messagebox.showerror("XATOLIK", f"Brauzerni ishga tushirishda xato yuz berdi: {e}")
+        return None
+
 # ================== GOOGLE LOGIN ==================
 
-async def login_google(log_callback):
+def login_google(log_callback):
     log_callback("⚠️ Google'ga kirish oynasi ochilmoqda...")
-    log_callback("❗️ Brauzerda Google akkauntingizga kiring va oynani yoping yoki brauzer oynasini qoldiring. (Ko'rinadi)")
+    log_callback("❗️ Brauzerda Google akkauntingizga kiring va tugmasини bosing.")
+    
+    driver = open_browser_with_profile(log_callback, "https://accounts.google.com/signin")
+    
+    if driver:
+        start_time = time.time()
+        while time.time() - start_time < 3600:
+            try:
+                driver.title
+                time.sleep(1)
+            except:
+                log_callback("✅ Brauzer yopildi. Google kirish ma'lumotlari saqlandi.")
+                return True
 
-    pw, context, page = await open_persistent_context("https://accounts.google.com/signin", headless=False, log_callback=log_callback)
-    if page is None:
-        log_callback("Brauzerni ochib bo'lmadi.")
-        return False
-
-    start = time.time()
-    timeout = 3600
-    signed = False
-    while time.time() - start < timeout:
+        log_callback("⚠️ Kirish uchun juda ko'p vaqt ketdi.")
         try:
-            if 'signin' not in page.url.lower():
-                signed = True
-                break
+            driver.quit()
         except:
             pass
-        await asyncio.sleep(1)
-    return signed
 
-# ================== AUTOMATION ==================
+    return False
 
-async def run_automation_async(data, log_callback):
-    start_time = time.time()  # старт
+# ================== AVTOMATLASHTИРИШ ==================
+
+def run_automation(data, log_callback):
     url = data['url']
+
     if not url.startswith("http"):
         messagebox.showerror("XATOLIK", "URL noto‘g‘ri")
         return
+
     if not os.path.exists(data['passport_file']):
         messagebox.showerror("XATOLIK", "Passport fayli topilmadi")
         return
 
     log_callback("Brauzer saqlangan profil bilan ochilmoqda...")
-    pw, context, page = await open_persistent_context(initial_url=url, headless=False, log_callback=log_callback)
-    if page is None:
-        log_callback("Brauzerni ochib bo'lmadi. Avval 'Google'ga kirish' tugmasini bosing va profilingizni saqlang.")
+    driver = open_browser_with_profile(log_callback, initial_url=url)
+    if driver is None:
+        log_callback("Brauzerni ochib bo'lmadi.")
         return
 
+    wait = WebDriverWait(driver, EXPLICIT_WAIT_TIME)
+    log_callback("Google Form ochilmoqda...")
+
     try:
+        wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, "Qr7Oae")))
+        log_callback("Savollar topildi.")
+    except:
+        log_callback("Savollar topilmadi.")
         try:
-            await page.wait_for_selector('.Qr7Oae', timeout=EXPLICIT_WAIT_TIME * 1000)
-            log_callback('Savollar topildi.')
-        except PWTimeout:
-            log_callback('Savollar topilmadi yoki Google kirishni talab qildi.')
-            return
-
-        blocks = await find_blocks(page)
-        for i, block in enumerate(blocks):
-            status = False
-            try:
-                text = (await block.inner_text() or "").lower()
-            except:
-                text = ""
-            if any(k in text for k in ["ism", "имя"]):
-                status = await fill_text_or_date_handle(page, block, data['name'])
-            elif any(k in text for k in ["familiya", "фамилия"]):
-                status = await fill_text_or_date_handle(page, block, data['surname'])
-            elif any(k in text for k in ["tug", "дата"]):
-                status = await fill_text_or_date_handle(page, block, data['birth'])
-            elif any(k in text for k in ["telefon", "номер"]):
-                status = await fill_text_or_date_handle(page, block, data['phone'])
-            elif any(k in text for k in ["viloyat", "shahar", "прож", "region"]):
-                city_value = data['city_or_region']
-                if city_value and "far" in city_value.lower():
-                    city_value = "Farg'ona"
-                status = await fill_dropdown_handle(page, block, city_value) or await fill_text_or_date_handle(page, block, city_value)
-            elif any(k in text for k in ["jins", "пол"]):
-                status = await click_by_text_handle(page, block, data['gender'])
-            elif any(k in text for k in ["modul", "модуль"]):
-                status = await click_by_text_handle(page, block, data['module'])
-            elif any(k in text for k in ["til", "язык"]):
-                status = await click_by_text_handle(page, block, data['lang'])
-            elif any(k in text for k in ["oldin", "ранее"]):
-                status = await click_by_text_handle(page, block, data['first_time'])
-            elif any(k in text for k in ["roziman", "соглас"]):
-                status = await click_by_text_handle(page, block, "roziman")
-            elif any(k in text for k in ["passport", "id", "rasm", "file"]):
-                status = await upload_file_handle(page, block, data['passport_file'])
-            log_callback(f"Blok {i + 1}: {'✅ OK' if status else '❌ XATO'}")
-
-        # Auto-submit
-        try:
-            submit = None
-            for t in ['Отправить', 'Submit', 'Yuborish']:
-                try:
-                    submit = page.locator(f"//span[contains(normalize-space(.), '{t}')]").first
-                    if submit:
-                        await submit.click(timeout=3000)
-                        log_callback('📤 Forma avtomatik yuborildi!')
-                        break
-                except:
-                    submit = None
-            if not submit:
-                log_callback("⚠️ 'Отправить' tugmasi topilmadi yoki bosib bo'lmadi.")
+            driver.quit()
         except:
-            log_callback("⚠️ 'Отправить' tugmasi topilmadi yoki bosib bo'lmadi.")
+            pass
+        return
 
-    finally:
-        log_callback("⚠️ Brauzerni qo'lda yopishingiz mumkin. Profil saqlanadi.")
-    elapsed = time.time() - start_time  # прошло секунд
-    log_callback(f"⏱️ Forma to‘ldirildi {elapsed:.2f} soniyada.")
+    blocks = find_blocks(driver)
+
+    for i, block in enumerate(blocks):
+        status = False
+        text = block.text.lower()
+
+        if "ism" in text or "имя" in text:
+            status = fill_text_or_date(driver, block, data['name'])
+
+        elif "familiya" in text or "фамилия" in text:
+            status = fill_text_or_date(driver, block, data['surname'])
+
+        elif "tug" in text or "дата" in text:
+            status = fill_text_or_date(driver, block, data['birth'])
+
+        elif "telefon" in text or "номер" in text:
+            status = fill_text_or_date(driver, block, data['phone'])
+
+        elif "viloyat" in text or "shahar" in text or "прож" in text or "region" in text:
+            city_value = data['city_or_region']
+
+            # === FUZZY MATCH "far" ===
+            if "far" in city_value.lower():
+                city_value = "Farg'ona"
+
+            status = fill_dropdown(driver, block, city_value, wait) or fill_text_or_date(driver, block, city_value)
+
+        elif "jins" in text or "пол" in text:
+            status = click_by_text(driver, block, data['gender'])
+
+        elif "modul" in text or "модуль" in text:
+            status = click_by_text(driver, block, data['module'])
+
+        elif "til" in text or "язык" in text:
+            status = click_by_text(driver, block, data['lang'])
+
+        elif "oldin" in text or "ранее" in text:
+            status = click_by_text(driver, block, data['first_time'])
+
+        elif "roziman" in text or "соглас" in text:
+            status = click_by_text(driver, block, "roziman")
+
+        elif "passport" in text or "id" in text or "rasm" in text or "file" in text:
+            status = upload_file(driver, block, data['passport_file'], wait)
+
+        log_callback(f"Blok {i + 1}: {'✅ OK' if status else '❌ XATO'}")
+
+    # === AUTO SUBMIT ===
+    try:
+        submit_btn = driver.find_element(By.XPATH,
+            "//span[contains(text(),'Отправить') or "
+            "contains(text(),'Submit') or "
+            "contains(text(),'Yuborish')]"
+        )
+        scroll_to(driver, submit_btn)
+        safe_click(driver, submit_btn)
+        log_callback("📤 Forma avtomatik yuborildi!")
+    except:
+        log_callback("⚠️ 'Отправить' tugmasi topilmadi yoki bosilmadi.")
+
+    log_callback("⚠️ Brauzerni hohlagan vaqtda yopishingiz mumkin.")
+
 # ================== INTERFACE ==================
 
 class FormApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
+
         self.title("Google Form Auto Fill")
-        self.geometry("1200x800")
+        self.geometry("1920x1080")
 
         self.passport_file_path = ctk.StringVar(value="")
         self.url_var = ctk.StringVar(value=DEFAULT_URL)
@@ -382,13 +357,13 @@ class FormApp(ctk.CTk):
 
         ctk.CTkLabel(self.left, text="🔑 Google Akkauntiga Kirish", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=10, pady=(10, 0))
         ctk.CTkLabel(self.left, text="Avval bir marta kirish kerak.\nBrauzer ochilgach, Google'ga kiring va yoping.").pack(anchor="w", padx=10, pady=(0, 5))
-        ctk.CTkButton(self.left, text="Google'ga kirish 🚪", command=lambda: asyncio.run(self.start_login())).pack(fill="x", padx=10, pady=(5, 15))
-
+        ctk.CTkButton(self.left, text="Google'ga kirish 🚪", command=self.start_login).pack(fill="x", padx=10, pady=(5, 15))
+        
         ctk.CTkLabel(self.left, text="📝 Forma Ma'lumotlari", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=10, pady=(10, 0))
         ctk.CTkLabel(self.left, text="Forma URL").pack(anchor="w", padx=10, pady=(10, 0))
         self.url_entry = ctk.CTkEntry(self.left, textvariable=self.url_var)
         self.url_entry.pack(fill="x", padx=10, pady=5)
-        self.url_entry.bind("<Return>", lambda e: asyncio.run(self.auto_start(e)))
+        self.url_entry.bind("<Return>", self.auto_start)
 
         self.entries = {}
         fields = ["Ism", "Familiya", "Tugilgan sana (M:01.09.2011)", "Telefon (+998XXXXXXXXX)"]
@@ -399,6 +374,7 @@ class FormApp(ctk.CTk):
             e.insert(0, self.previous_entries.get(f, ""))
             self.entries[f] = e
 
+        # === ENTER → NEXT FIELD ===
         entry_list = list(self.entries.values())
         for i, entry in enumerate(entry_list):
             def make_handler(idx):
@@ -431,8 +407,8 @@ class FormApp(ctk.CTk):
         self.first.set(self.previous_options.get("first_time", FIRST_TIME_OPTIONS[0]))
 
         ctk.CTkButton(self.left, text="Passport fayl tanlash 🖼️", command=self.select_file).pack(fill="x", padx=10, pady=15)
-
-        self.start_button = ctk.CTkButton(self.left, text="🔥 Avtomatik to'ldirishni boshlash", command=lambda: asyncio.run(self.start_automation_from_button()), height=60, font=ctk.CTkFont(size=18, weight="bold"))
+        
+        self.start_button = ctk.CTkButton(self.left, text="🔥 Avtomatik to'ldirishni boshlash", command=self.start_automation_from_button, height=60, font=ctk.CTkFont(size=18, weight="bold"))
         self.start_button.pack(padx=50, pady=30, fill="x")
 
     def create_log_ui(self):
@@ -457,25 +433,21 @@ class FormApp(ctk.CTk):
             self.passport_file_path.set(file)
             self.log_message(f"Fayl tanlandi: {os.path.basename(file)}")
 
-    async def start_login(self):
+    def start_login(self):
         self.logbox.delete("1.0", "end")
-        ok = await login_google(self.log_message)
-        if ok:
-            self.log_message("✅ Google profilingiz saqlandi.")
-        else:
-            self.log_message("❌ Google profilingiz saqlanmadi yoki oynani yopdingiz.")
+        login_google(self.log_message)
 
-    async def start_automation_from_button(self):
+    def start_automation_from_button(self):
         self.logbox.delete("1.0", "end")
         self.log_message("🔥 Avtomatik to'ldirish boshlanmoqda...")
-        await self.run_automation_with_data()
-
-    async def auto_start(self, event):
+        self.run_automation_with_data()
+        
+    def auto_start(self, event):
         self.logbox.delete("1.0", "end")
         self.log_message("Avtomatik ishga tushirildi...")
-        await self.run_automation_with_data()
-
-    async def run_automation_with_data(self):
+        self.run_automation_with_data()
+    
+    def run_automation_with_data(self):
         data = {
             "url": self.url_var.get(),
             "name": self.entries["Ism"].get(),
@@ -489,8 +461,9 @@ class FormApp(ctk.CTk):
             "first_time": self.first.get(),
             "passport_file": self.passport_file_path.get()
         }
+
         save_settings(data)
-        await run_automation_async(data, self.log_message)
+        run_automation(data, self.log_message)
 
 
 if __name__ == "__main__":
